@@ -68,27 +68,51 @@ prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
 ## PENALIZED REGRESSION MODEL ##
-preg_model <- linear_reg(penalty=0, mixture=1) %>% #Set model and tuning
+preg_model <- linear_reg(penalty=tune(), mixture=tune()) %>% #Set model and tuning
   set_engine("glmnet") # Function to fit in R
-# lowest: .64362 -- penalty=0, mixture=1
-# other: .64678 -- penalty=0, mixture=0
-# other: .64363 -- penalty=0, mixture=.5
-# other: .64364 -- penalty=0, mixture=.75 or .8 or .9
-
 
 preg_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(preg_model) %>%
+  add_model(preg_model) 
+
+# Grid of values to tune over
+grid_of_tuning_params <- grid_regular(penalty(),
+                                      mixture(),
+                                      levels = 5) ## L^2 total tuning possibilities
+
+## Split data for CV
+folds <- vfold_cv(train_clean, v = 6, repeats=1)
+
+# Run the CV1
+CV_results <- preg_wf %>%
+  tune_grid(resamples=folds,
+            grid=grid_of_tuning_params,
+            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+## Plot Results (example)
+collect_metrics(CV_results) %>% # Gathers metrics into DF
+  filter(.metric=="rmse") %>%
+  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
+  geom_line()
+
+# Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best(metric="rmse")
+
+
+## Finalize the Workflow & fit it1
+final_wf <- preg_wf %>%
+  finalize_workflow(bestTune) %>%
   fit(data=train_clean)
-predict(preg_wf, new_data=test)
 
 ## MAKE PREDICTIONS ##
-# Predict using workflow
-preg_preds = predict(preg_wf, new_data=test)
-preg_preds
+## Predict
+final_wf %>%
+  predict(new_data = test)
+tuned_preds = predict(final_wf, new_data = test)
 
 ## Format predictions for kaggle submission
-recipe_kaggle_submission <- preg_preds %>% 
+recipe_kaggle_submission <- tuned_preds %>% 
   bind_cols(., test) %>% 
   select(datetime, .pred) %>% 
   rename(count = .pred) %>% 
@@ -96,6 +120,6 @@ recipe_kaggle_submission <- preg_preds %>%
   mutate(count = exp(count))
 
 ## Write out file
-vroom_write(x=recipe_kaggle_submission, file="./PRegPreds.csv", delim=",")
+vroom_write(x=recipe_kaggle_submission, file="./TunedPreds.csv", delim=",")
 
 
