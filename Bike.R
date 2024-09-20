@@ -5,6 +5,7 @@ library(patchwork)
 library(vroom)
 library(poissonreg)
 library(tidymodels)
+library(glmnet)
 
 #
 #### READ IN DATA ####
@@ -58,29 +59,36 @@ bike_recipe = recipe(count~., data=train_clean) %>%
                                      levels=c(0:23), labels=c(0:23))) %>% 
   step_mutate(season = factor(season, levels=c(1,2,3,4),    # factor weather
                               labels=c("spring", "summer", "fall", "winter"))) %>% 
-  step_date(datetime, features="dow")                       # extract day of week
+  step_date(datetime, features="dow") %>%                   # extract day of week
+  step_rm(datetime) %>% 
+  step_dummy(all_nominal_predictors()) %>%                  # make dummy variables
+  step_normalize(all_numeric_predictors())                  # mean = 0, sd = 1
+
 prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
-## CREATE WORKFLOW ##
-# Define the linear model
-lin_model <- linear_reg() %>%
-  set_engine("lm") %>%
-  set_mode("regression")
+## PENALIZED REGRESSION MODEL ##
+preg_model <- linear_reg(penalty=0, mixture=1) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+# lowest: .64362 -- penalty=0, mixture=1
+# other: .64678 -- penalty=0, mixture=0
+# other: .64363 -- penalty=0, mixture=.5
+# other: .64364 -- penalty=0, mixture=.75 or .8 or .9
 
-# Combine into workflow
-bike_workflow <- workflow() %>%
+
+preg_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(lin_model) %>%
+  add_model(preg_model) %>%
   fit(data=train_clean)
+predict(preg_wf, new_data=test)
 
 ## MAKE PREDICTIONS ##
 # Predict using workflow
-lin_preds = predict(bike_workflow, new_data = test)
-lin_preds
+preg_preds = predict(preg_wf, new_data=test)
+preg_preds
 
 ## Format predictions for kaggle submission
-recipe_kaggle_submission <- lin_preds %>% 
+recipe_kaggle_submission <- preg_preds %>% 
   bind_cols(., test) %>% 
   select(datetime, .pred) %>% 
   rename(count = .pred) %>% 
@@ -88,6 +96,6 @@ recipe_kaggle_submission <- lin_preds %>%
   mutate(count = exp(count))
 
 ## Write out file
-vroom_write(x=recipe_kaggle_submission, file="./LinearPreds.csv", delim=",")
+vroom_write(x=recipe_kaggle_submission, file="./PRegPreds.csv", delim=",")
 
 
