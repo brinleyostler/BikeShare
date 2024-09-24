@@ -67,24 +67,28 @@ bike_recipe = recipe(count~., data=train_clean) %>%
 prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
-## PENALIZED REGRESSION MODEL ##
-preg_model <- linear_reg(penalty=tune(), mixture=tune()) %>% #Set model and tuning
-  set_engine("glmnet") # Function to fit in R
+## REGRESSION TREE MODEL ##
+tree_model <- decision_tree(tree_depth = tune(),
+                            cost_complexity = tune(),
+                            min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # What R function to use
+  set_mode("regression")
 
-preg_wf <- workflow() %>%
+tree_wf <- workflow() %>%
   add_recipe(bike_recipe) %>%
-  add_model(preg_model) 
+  add_model(tree_model) 
 
 # Grid of values to tune over
-grid_of_tuning_params <- grid_regular(penalty(),
-                                      mixture(),
+grid_of_tuning_params <- grid_regular(tree_depth(),
+                                      cost_complexity(),
+                                      min_n(),
                                       levels = 5) ## L^2 total tuning possibilities
 
 ## Split data for CV
-folds <- vfold_cv(train_clean, v = 6, repeats=1)
+folds <- vfold_cv(train_clean, v = 3, repeats=1)
 
 # Run the CV1
-CV_results <- preg_wf %>%
+CV_results <- tree_wf %>%
   tune_grid(resamples=folds,
             grid=grid_of_tuning_params,
             metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
@@ -100,8 +104,8 @@ bestTune <- CV_results %>%
   select_best(metric="rmse")
 
 
-## Finalize the Workflow & fit it1
-final_wf <- preg_wf %>%
+## Finalize the Workflow & fit it
+final_wf <- tree_wf %>%
   finalize_workflow(bestTune) %>%
   fit(data=train_clean)
 
@@ -120,6 +124,6 @@ recipe_kaggle_submission <- tuned_preds %>%
   mutate(count = exp(count))
 
 ## Write out file
-vroom_write(x=recipe_kaggle_submission, file="./TunedPreds.csv", delim=",")
+vroom_write(x=recipe_kaggle_submission, file="./TreePreds.csv", delim=",")
 
 
