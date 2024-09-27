@@ -6,6 +6,7 @@ library(vroom)
 library(poissonreg)
 library(tidymodels)
 library(glmnet)
+library(stacks)
 
 #
 #### READ IN DATA ####
@@ -13,7 +14,7 @@ library(glmnet)
 train = vroom(file = "train.csv")
 test = vroom(file = "test.csv")
 
-
+#
 #### EXPLORATORY DATA ANALYSIS ####
 glimpse(train)
 
@@ -48,6 +49,13 @@ train_clean = train %>%
   select(-casual, -registered) %>% 
   mutate(count = log(count))
 
+#### RANDOM FORESTS ####
+forest_mod <- rand_forest(mtry = tune(),
+                          min_n=tune(),
+                          trees=500) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
 #### FEATURE ENGINEERING ####
 # Create and "bake" the recipe
 bike_recipe = recipe(count~., data=train_clean) %>% 
@@ -60,63 +68,86 @@ bike_recipe = recipe(count~., data=train_clean) %>%
   step_mutate(season = factor(season, levels=c(1,2,3,4),    # factor weather
                               labels=c("spring", "summer", "fall", "winter"))) %>% 
   step_date(datetime, features="dow") %>%                   # extract day of week
-  step_rm(datetime) %>% 
+  step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>%                  # make dummy variables
   step_normalize(all_numeric_predictors())                  # mean = 0, sd = 1
 
 prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
-## REGRESSION TREE MODEL ##
-tree_model <- decision_tree(tree_depth = tune(),
-                            cost_complexity = tune(),
-                            min_n=tune()) %>% #Type of model
-  set_engine("rpart") %>% # What R function to use
-  set_mode("regression")
-
-tree_wf <- workflow() %>%
-  add_recipe(bike_recipe) %>%
-  add_model(tree_model) 
-
-# Grid of values to tune over
-grid_of_tuning_params <- grid_regular(tree_depth(),
-                                      cost_complexity(),
-                                      min_n(),
-                                      levels = 5) ## L^2 total tuning possibilities
-
+## STACKED MODEL ####
+# 3 models: linear, penalized, random forest
 ## Split data for CV
-folds <- vfold_cv(train_clean, v = 3, repeats=1)
+folds <- vfold_cv(train_clean, v = 5, repeats=1)
 
-# Run the CV1
-CV_results <- tree_wf %>%
+## Create a control grid
+untuned_model <- control_stack_grid() #If tuning over a grid
+tuned_model <- control_stack_resamples() #If not tuning a model
+
+## Penalized regression model
+preg_model <- linear_reg(penalty=tune(),
+                         mixture=tune()) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+## Set Workflow
+preg_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(preg_model)
+
+## Grid of values to tune over
+preg_tuning_grid <- grid_regular(penalty(),
+                                 mixture(),
+                                 levels = 5) ## L^2 total tuning possibilities
+
+## Run the CV
+preg_models <- preg_wf %>%
   tune_grid(resamples=folds,
-            grid=grid_of_tuning_params,
-            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+            grid=preg_tuning_grid,
+            metrics=metric_set(rmse, mae, rsq),
+            control = untuned_model) # including the control grid in the tuning ensures you can
+# call on it later in the stacked model
 
-## Plot Results (example)
-collect_metrics(CV_results) %>% # Gathers metrics into DF
-  filter(.metric=="rmse") %>%
-  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
-  geom_line()
+## Create other resampling objects with different ML algorithms to include in a stacked model, for ex
+linear_model <- linear_reg() %>%
+  set_engine("lm")
 
-# Find Best Tuning Parameters
-bestTune <- CV_results %>%
-  select_best(metric="rmse")
+lin_reg_wf <- workflow() %>%
+  add_model(linear_model) %>%
+  add_recipe(bike_recipe)
+
+lin_reg_model <- fit_resamples(
+    lin_reg_wf,
+    resamples = folds,
+    metrics = metric_set(rmse, mae, rsq),
+    control = tuned_model)
+
+## Specify which models to include
+my_stack <- stacks() %>%
+  add_candidates(preg_models) %>%
+  add_candidates(lin_reg_model)
 
 
-## Finalize the Workflow & fit it
-final_wf <- tree_wf %>%
-  finalize_workflow(bestTune) %>%
-  fit(data=train_clean)
+## Fit the stacked model
+stack_mod <- my_stack %>%
+  blend_predictions() %>% # LASSO penalized regression meta-learner
+  fit_members() ## Fit the members to the dataset
 
+## If you want to build your own metalearner you'll have to do so manually using
+stackData <- as_tibble(my_stack)
+
+
+
+
+#####
 ## MAKE PREDICTIONS ##
 ## Predict
-final_wf %>%
-  predict(new_data = test)
-tuned_preds = predict(final_wf, new_data = test)
+## Use the stacked data to get a prediction
+stack_mod %>% predict(new_data=test)
+
+stacked_preds = predict(stack_mod, new_data = test)
 
 ## Format predictions for kaggle submission
-recipe_kaggle_submission <- tuned_preds %>% 
+recipe_kaggle_submission <- stacked_preds %>% 
   bind_cols(., test) %>% 
   select(datetime, .pred) %>% 
   rename(count = .pred) %>% 
@@ -124,6 +155,6 @@ recipe_kaggle_submission <- tuned_preds %>%
   mutate(count = exp(count))
 
 ## Write out file
-vroom_write(x=recipe_kaggle_submission, file="./TreePreds.csv", delim=",")
+vroom_write(x=recipe_kaggle_submission, file="./StackedPreds.csv", delim=",")
 
 
