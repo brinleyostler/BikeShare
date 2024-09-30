@@ -49,13 +49,6 @@ train_clean = train %>%
   select(-casual, -registered) %>% 
   mutate(count = log(count))
 
-#### RANDOM FORESTS ####
-forest_mod <- rand_forest(mtry = tune(),
-                          min_n=tune(),
-                          trees=500) %>% #Type of model
-  set_engine("ranger") %>% # What R function to use
-  set_mode("regression")
-
 #### FEATURE ENGINEERING ####
 # Create and "bake" the recipe
 bike_recipe = recipe(count~., data=train_clean) %>% 
@@ -75,79 +68,47 @@ bike_recipe = recipe(count~., data=train_clean) %>%
 prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
-## STACKED MODEL ####
-# 3 models: linear, penalized, random forest
+## K-NEAREST NEIGHBOR MODEL ####
+knn_model <- nearest_neighbor(
+  mode = "regression",
+  engine = "kknn")
+
+knn_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(knn_model)
+
+# Grid of values to tune over
+grid_of_tuning_params <- grid_regular(min_n(),
+                                      levels = 5) ## L^2 total tuning possibilities
+
 ## Split data for CV
-folds <- vfold_cv(train_clean, v = 5, repeats=1)
+folds <- vfold_cv(train_clean, v = 3, repeats=1)
 
-## Create a control grid
-untuned_model <- control_stack_grid() #If tuning over a grid
-tuned_model <- control_stack_resamples() #If not tuning a model
-
-## Penalized regression model
-preg_model <- linear_reg(penalty=tune(),
-                         mixture=tune()) %>% #Set model and tuning
-  set_engine("glmnet") # Function to fit in R
-
-## Set Workflow
-preg_wf <- workflow() %>%
-  add_recipe(bike_recipe) %>%
-  add_model(preg_model)
-
-## Grid of values to tune over
-preg_tuning_grid <- grid_regular(penalty(),
-                                 mixture(),
-                                 levels = 5) ## L^2 total tuning possibilities
-
-## Run the CV
-preg_models <- preg_wf %>%
+# Run the CV1
+CV_results <- knn_wf %>%
   tune_grid(resamples=folds,
-            grid=preg_tuning_grid,
-            metrics=metric_set(rmse, mae, rsq),
-            control = untuned_model) # including the control grid in the tuning ensures you can
-# call on it later in the stacked model
+            grid=grid_of_tuning_params,
+            metrics=NULL) #Or leave metrics NULL
 
-## Create other resampling objects with different ML algorithms to include in a stacked model, for ex
-linear_model <- linear_reg() %>%
-  set_engine("lm")
+# Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best(metric="rmse")
 
-lin_reg_wf <- workflow() %>%
-  add_model(linear_model) %>%
-  add_recipe(bike_recipe)
-
-lin_reg_model <- fit_resamples(
-    lin_reg_wf,
-    resamples = folds,
-    metrics = metric_set(rmse, mae, rsq),
-    control = tuned_model)
-
-## Specify which models to include
-my_stack <- stacks() %>%
-  add_candidates(preg_models) %>%
-  add_candidates(lin_reg_model)
-
-
-## Fit the stacked model
-stack_mod <- my_stack %>%
-  blend_predictions() %>% # LASSO penalized regression meta-learner
-  fit_members() ## Fit the members to the dataset
-
-## If you want to build your own metalearner you'll have to do so manually using
-stackData <- as_tibble(my_stack)
-
-
+## Finalize the Workflow & fit it
+final_wf <- knn_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=train_clean)
 
 
 #####
 ## MAKE PREDICTIONS ##
 ## Predict
-## Use the stacked data to get a prediction
-stack_mod %>% predict(new_data=test)
-
-stacked_preds = predict(stack_mod, new_data = test)
+final_wf %>%
+  predict(new_data = test)
+knn_preds = predict(final_wf, new_data = test)
 
 ## Format predictions for kaggle submission
-recipe_kaggle_submission <- stacked_preds %>% 
+recipe_kaggle_submission <- knn_preds %>% 
   bind_cols(., test) %>% 
   select(datetime, .pred) %>% 
   rename(count = .pred) %>% 
@@ -155,6 +116,6 @@ recipe_kaggle_submission <- stacked_preds %>%
   mutate(count = exp(count))
 
 ## Write out file
-vroom_write(x=recipe_kaggle_submission, file="./StackedPreds.csv", delim=",")
+vroom_write(x=recipe_kaggle_submission, file="./KNNPreds.csv", delim=",")
 
 
