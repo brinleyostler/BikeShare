@@ -61,22 +61,31 @@ bike_recipe = recipe(count~., data=train_clean) %>%
   step_mutate(season = factor(season, levels=c(1,2,3,4),    # factor weather
                               labels=c("spring", "summer", "fall", "winter"))) %>% 
   step_date(datetime, features="dow") %>%                   # extract day of week
+  step_interact(terms = ~ datetime_hour*workingday) %>% 
+  step_date(datetime, features="year") %>%                  # make year a variable
   step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>%                  # make dummy variables
-  step_normalize(all_numeric_predictors())                  # mean = 0, sd = 1
+  step_normalize(all_numeric_predictors()) %>%              # mean = 0, sd = 1
+  step_corr(all_predictors())
 
 prepped_recipe = prep(bike_recipe)
 bike_baked = bake(prepped_recipe, new_data=train_clean)
 
-## K-NEAREST NEIGHBOR MODEL ####
-knn_model <- nearest_neighbor(
+## BART ####
+bart_model <- parsnip::bart(
   mode = "regression",
-  engine = "kknn")
+  engine = "dbarts",
+  trees = 1000,
+  prior_terminal_node_coef = .95,
+  prior_terminal_node_expo = 2,
+  prior_outcome_range = 2)
 
-knn_wf <- workflow() %>% 
+bart_wf <- workflow() %>% 
   add_recipe(bike_recipe) %>% 
-  add_model(knn_model)
+  add_model(bart_model) %>% 
+  fit(data = train_clean)
 
+## CV ####
 # Grid of values to tune over
 grid_of_tuning_params <- grid_regular(min_n(),
                                       levels = 5) ## L^2 total tuning possibilities
@@ -85,7 +94,7 @@ grid_of_tuning_params <- grid_regular(min_n(),
 folds <- vfold_cv(train_clean, v = 3, repeats=1)
 
 # Run the CV1
-CV_results <- knn_wf %>%
+CV_results <- bart_wf %>%
   tune_grid(resamples=folds,
             grid=grid_of_tuning_params,
             metrics=NULL) #Or leave metrics NULL
@@ -94,8 +103,8 @@ CV_results <- knn_wf %>%
 bestTune <- CV_results %>%
   select_best(metric="rmse")
 
-## Finalize the Workflow & fit it
-final_wf <- knn_wf %>%
+## Finalize the Workflow & fit it ####
+final_wf <- bart_wf %>%
   finalize_workflow(bestTune) %>%
   fit(data=train_clean)
 
@@ -103,9 +112,9 @@ final_wf <- knn_wf %>%
 #####
 ## MAKE PREDICTIONS ##
 ## Predict
-final_wf %>%
+bart_wf %>%
   predict(new_data = test)
-knn_preds = predict(final_wf, new_data = test)
+knn_preds = predict(bart_wf, new_data = test)
 
 ## Format predictions for kaggle submission
 recipe_kaggle_submission <- knn_preds %>% 
