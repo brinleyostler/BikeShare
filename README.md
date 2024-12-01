@@ -32,4 +32,6 @@ The dataset used in this project is provided by Kaggle and includes the followin
 
 
 ## Model
-To look at all models investigated in this project, look through the Git history of my Bike.R file.
+I used the BART model for my final predictions. It gave me the best results with the lowest RMSE of 0.36599.
+
+To look at all models I investigated in this project, look through the Git history of my Bike.R file.
